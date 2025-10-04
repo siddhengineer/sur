@@ -195,7 +195,7 @@ if mode == "Video":
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out_path = tempfile.mktemp(suffix='.mp4')
-            writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+        writer = cv2.VideoWriter(out_path, fourcc, float(fps), (w, h))
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         st.write(f"Processing...")
         progress = st.progress(0)

@@ -8,10 +8,10 @@ Setup
   python -m venv venv
 
 2. Activate the venv
-  .\venv\Scripts\Activate.ps1
+  .\venv\Scripts\Activate
 
 3. Install dependencies
   pip install -r requirements.txt
 
 4. Run the Streamlit app
-  streamlit run shoplifting_app.py
+  streamlit run shoplifting.py
