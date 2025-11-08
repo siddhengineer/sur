@@ -10,8 +10,11 @@ import time
 from datetime import datetime
 from collections import deque
 from src.yolo_detector import YOLODetector
+from src.camera_utils import build_url_with_credentials, test_camera
+from src.logging_config import init_logging
 from src.config import get_settings
 
+logger = init_logging()
 st.title("Shoplifting Detection - Batch Images & Video")
 
 settings = get_settings()
@@ -64,10 +67,15 @@ def cam_worker(source, name: str, pre_seconds: float = 2.0, post_seconds: float 
     try:
         cap = cv2.VideoCapture(source)
         if not cap.isOpened():
-            print(f"Failed to open camera: {source}")
-            st.session_state.live_latest[name] = ("__error__", None)
+            logger.error("cam_worker: failed to open camera: %s", str(source))
+            try:
+                if 'live_latest' not in st.session_state:
+                    st.session_state['live_latest'] = {}
+                st.session_state.live_latest[name] = ("__error__", None)
+            except Exception:
+                pass
             return
-        print(f"Live feed worker started: {name} -> {source}")
+        logger.info("cam_worker: started name=%s source=%s", name, str(source))
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         if not fps or fps <= 0 or fps > 120:
@@ -87,14 +95,19 @@ def cam_worker(source, name: str, pre_seconds: float = 2.0, post_seconds: float 
             try:
                 dets = detector.detect(frame)
             except Exception as e:
-                print(f"Detection error for {name}: {e}")
+                logger.exception("cam_worker: detection error for %s: %s", name, e)
                 dets = []
 
             out = draw_boxes(frame, dets)
 
             now = time.time()
             # store latest as jpeg bytes to keep session small
-            st.session_state.live_latest[name] = (now, _encode_jpeg_bgr(out))
+            try:
+                if 'live_latest' not in st.session_state:
+                    st.session_state['live_latest'] = {}
+                st.session_state.live_latest[name] = (now, _encode_jpeg_bgr(out))
+            except Exception:
+                pass
 
             # maintain pre-buffer
             pre_buffer.append(out.copy())
@@ -107,24 +120,36 @@ def cam_worker(source, name: str, pre_seconds: float = 2.0, post_seconds: float 
                     break
 
             if found:
-                st.session_state.live_any_alert[name] = True
-                # save the current annotated frame as last alert
-                st.session_state.live_last_alert_bytes[name] = _encode_jpeg_bgr(out)
+                try:
+                    if 'live_any_alert' not in st.session_state:
+                        st.session_state['live_any_alert'] = {}
+                    if 'live_last_alert_bytes' not in st.session_state:
+                        st.session_state['live_last_alert_bytes'] = {}
+                    st.session_state.live_any_alert[name] = True
+                    st.session_state.live_last_alert_bytes[name] = _encode_jpeg_bgr(out)
+                except Exception:
+                    pass
                 # also write a timestamped JPEG file in alerts_dir for persistence
                 try:
                     ts = datetime.fromtimestamp(now).strftime('%Y%m%d_%H%M%S')
                     fname = alerts_dir / f"{name}_alert_{ts}.jpg"
                     with open(fname, 'wb') as f:
-                        f.write(st.session_state.live_last_alert_bytes[name])
-                    print(f"Saved alert frame for {name} -> {fname}")
+                        try:
+                            data = st.session_state.live_last_alert_bytes.get(name)
+                        except Exception:
+                            data = None
+                        if not data:
+                            data = _encode_jpeg_bgr(out)
+                        f.write(data)
+                    logger.info("cam_worker: saved alert frame name=%s file=%s", name, str(fname))
                 except Exception as e:
-                    print(f"Failed to save alert frame for {name}: {e}")
+                    logger.exception("cam_worker: failed to save alert frame for %s: %s", name, e)
 
             time.sleep(0.01)
     finally:
         if cap is not None:
             cap.release()
-        print(f"Live feed worker stopped: {name}")
+        logger.info("cam_worker: stopped name=%s", name)
 
 
 def draw_boxes(img: np.ndarray, detections):
@@ -269,11 +294,44 @@ else:
     if live_choice == "Local camera (attached)":
         cam_index = st.number_input("Webcam index", min_value=0, max_value=10, value=0, step=1)
         source_val = int(cam_index)
+        cam_name = st.text_input("Camera name (unique)", value=f"webcam_{cam_index}")
     else:
         cam_url = st.text_input("Remote camera URL (rtsp:// or http:// ...)")
-        source_val = cam_url.strip()
+        colu, colp = st.columns(2)
+        with colu:
+            cam_user = st.text_input("Username", key="remote_user")
+        with colp:
+            cam_pass = st.text_input("Password", type="password", key="remote_pass")
 
-    cam_name = st.text_input("Camera name (unique)", value=f"cam_{0 if live_choice.startswith('Local') else 1}")
+        # Build final URL with credentials (if provided) and show masked
+        final_url = build_url_with_credentials(cam_url.strip(), cam_user, cam_pass)
+        masked = final_url
+        if "@" in masked:
+            try:
+                prefix, rest = masked.split("://", 1)
+                _creds, hostrest = rest.split("@", 1)
+                masked = f"{prefix}://***:***@{hostrest}"
+            except Exception:
+                pass
+        st.caption(f"Final URL: {masked}")
+        logger.info("UI: final camera URL built (masked) %s", masked)
+
+        # Hint for web page URLs
+        if final_url.startswith("http") and not any(tok in final_url.lower() for tok in [".mjpg", ".mjpeg", ".m3u8", "?action=stream", "video.mjpg", "mjpegstream"]):
+            st.info("This looks like a web page. Provide a direct RTSP or MJPEG stream URL.")
+
+        if st.button("Test camera"):
+            ok, fps, size, jpeg_bytes, err = test_camera(final_url)
+            logger.info("UI: test_camera result ok=%s fps=%s size=%s err=%s", ok, fps, size, err)
+            if ok:
+                st.success(f"Connected. FPS ~ {fps or 'n/a'}, size: {size or 'n/a'}")
+                if jpeg_bytes:
+                    st.image(jpeg_bytes, caption="Test frame", use_column_width=True)
+            else:
+                st.error(f"Test failed: {err}")
+
+        source_val = final_url
+        cam_name = st.text_input("Camera name (unique)", value=(cam_user or "remote_cam"))
 
     start_btn = st.button("Start")
     stop_btn = st.button("Stop")
@@ -286,18 +344,22 @@ else:
             st.session_state.live_stops[cam_name] = False
             if cam_name in st.session_state.live_threads and st.session_state.live_threads[cam_name].is_alive():
                 st.info("Camera already running")
+                logger.info("UI: start requested but already running name=%s", cam_name)
             else:
                 t = threading.Thread(target=cam_worker, args=(source_val, cam_name, pre_seconds, post_seconds), daemon=True)
                 st.session_state.live_threads[cam_name] = t
                 t.start()
+                logger.info("UI: started camera worker name=%s", cam_name)
                 st.success(f"Started camera worker: {cam_name}")
 
     if stop_btn:
         if cam_name in st.session_state.live_threads:
             st.session_state.live_stops[cam_name] = True
+            logger.info("UI: stopping camera worker name=%s", cam_name)
             st.success(f"Stopping camera worker: {cam_name}")
         else:
             st.info("No worker found for that name")
+            logger.info("UI: stop requested but no worker found name=%s", cam_name)
 
     # Display live previews for all running cameras
     st.subheader("Live previews")
