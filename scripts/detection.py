@@ -10,7 +10,6 @@ import time
 from datetime import datetime
 from collections import deque
 from src.yolo_detector import YOLODetector
-from api.service.telegram_service import send_telegram_alert
 from src.camera_utils import build_url_with_credentials, test_camera
 from src.logging_config import init_logging
 from src.config import get_settings
@@ -130,10 +129,6 @@ def cam_worker(source, name: str, pre_seconds: float = 2.0, post_seconds: float 
                     st.session_state.live_last_alert_bytes[name] = _encode_jpeg_bgr(out)
                 except Exception:
                     pass
-                try:
-                    send_telegram_alert(f"Shoplifting detected on camera: {name}")
-                except Exception:
-                    pass
                 # also write a timestamped JPEG file in alerts_dir for persistence
                 try:
                     ts = datetime.fromtimestamp(now).strftime('%Y%m%d_%H%M%S')
@@ -192,10 +187,6 @@ if mode == "Video":
                 st.image(out, channels="BGR", caption=f"{uploaded_file.name} - Detection Result")
                 if found_shoplifting:
                     st.error("Shoplifting detected!")
-                    try:
-                        send_telegram_alert("Shoplifting detected in image upload.")
-                    except Exception:
-                        pass
                     # Offer download of the annotated frame for this image
                     ok, buf = cv2.imencode('.jpg', out)
                     if ok:
@@ -275,10 +266,6 @@ if mode == "Video":
         writer.release()
         if found_shoplifting:
             st.error("Shoplifting detected in video!")
-            try:
-                send_telegram_alert("Shoplifting detected in uploaded video.")
-            except Exception:
-                pass
             # Offer download of the first detected frame as a JPEG
             if first_detected_frame is not None:
                 ok, buf = cv2.imencode('.jpg', first_detected_frame)
