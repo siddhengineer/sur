@@ -34,3 +34,5 @@ httpx
 # Notes:
 # - For servers without GUI, you can switch to opencv-python-headless instead of opencv-python.
 # - For GPU inference, install the appropriate Torch wheel for your CUDA version from pytorch.org.
+
+aiosqlite
