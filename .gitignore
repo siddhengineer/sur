@@ -6,3 +6,7 @@ results/
 *.mp4
 *.jpg
 *.png
+.env/
+__pycache__/
+__init__.py
+/logs/

@@ -11,6 +11,7 @@ from datetime import datetime
 from collections import deque
 from src.yolo_detector import YOLODetector
 from src.camera_utils import build_url_with_credentials, test_camera
+from urllib.parse import urlsplit, urlunsplit, quote, unquote
 from src.logging_config import init_logging
 from src.config import get_settings
 
@@ -19,6 +20,56 @@ st.title("Shoplifting Detection - Batch Images & Video")
 
 settings = get_settings()
 detector = YOLODetector(model_name=settings.yolo_model, conf_thresh=settings.detection_confidence)
+
+
+def _generate_rtsp_variants(url: str) -> list:
+    """Return a small list of URL variants to try for RTSP auth/encoding issues.
+
+    Variants include: original, fully-unquoted, and reassembled forms with
+    different quoting of username/password when present.
+    """
+    variants = []
+    try:
+        parsed = urlsplit(str(url))
+    except Exception:
+        # fallback to simple attempts
+        v = str(url)
+        return [v, unquote(v)] if unquote(v) != v else [v]
+
+    orig = str(url)
+    if orig not in variants:
+        variants.append(orig)
+
+    unq_full = unquote(orig)
+    if unq_full not in variants:
+        variants.append(unq_full)
+
+    # If creds present in netloc, try variants with different quoting
+    if "@" in parsed.netloc:
+        try:
+            creds, hostrest = parsed.netloc.split("@", 1)
+            if ":" in creds:
+                user, pwd = creds.split(":", 1)
+                user_unq = unquote(user)
+                pwd_unq = unquote(pwd)
+                attempts = [
+                    (user, pwd),
+                    (user_unq, pwd),
+                    (user, pwd_unq),
+                    (user_unq, pwd_unq),
+                ]
+                for u, p in attempts:
+                    try:
+                        new_net = f"{quote(u, safe='')}:{quote(p, safe='')}@{hostrest}"
+                        candidate = urlunsplit((parsed.scheme, new_net, parsed.path, parsed.query, ""))
+                        if candidate not in variants:
+                            variants.append(candidate)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    return variants
 
 
 def is_shoplifting_detection(d) -> bool:
@@ -65,8 +116,55 @@ def cam_worker(source, name: str, pre_seconds: float = 2.0, post_seconds: float 
     """
     cap = None
     try:
-        cap = cv2.VideoCapture(source)
-        if not cap.isOpened():
+        # Prefer FFMPEG backend and set sane FFmpeg options for RTSP
+        os.environ.setdefault(
+            "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+            "rtsp_transport;tcp|max_delay;5000000|stimeout;30000000",
+        )
+
+        # Try multiple URL encodings/quoting variants to mitigate auth/encoding issues
+        candidates = _generate_rtsp_variants(str(source))
+        cap = None
+        for cand in candidates:
+            # try FFMPEG backend first
+            try:
+                c = cv2.VideoCapture(cand, cv2.CAP_FFMPEG)
+                try:
+                    c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+                if c.isOpened():
+                    cap = c
+                    logger.info("cam_worker: opened using candidate URL (ffmpeg): %s", cand)
+                    break
+                else:
+                    try:
+                        c.release()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # fallback to default backend for this candidate
+            try:
+                c = cv2.VideoCapture(cand)
+                try:
+                    c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+                if c.isOpened():
+                    cap = c
+                    logger.info("cam_worker: opened using candidate URL (default): %s", cand)
+                    break
+                else:
+                    try:
+                        c.release()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if cap is None or not cap.isOpened():
             logger.error("cam_worker: failed to open camera: %s", str(source))
             try:
                 if 'live_latest' not in st.session_state:
@@ -75,6 +173,7 @@ def cam_worker(source, name: str, pre_seconds: float = 2.0, post_seconds: float 
             except Exception:
                 pass
             return
+
         logger.info("cam_worker: started name=%s source=%s", name, str(source))
 
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -337,20 +436,28 @@ else:
     stop_btn = st.button("Stop")
 
     if start_btn:
+        # Auto-generate camera name when not provided by user
         if not cam_name:
-            st.error("Provide a camera name")
+            try:
+                from urllib.parse import urlsplit
+
+                parts = urlsplit(str(source_val))
+                host = parts.hostname or parts.path or f"remote_cam_{len(st.session_state.live_threads) + 1}"
+                cam_name = host.replace(".", "_").replace(":", "_")
+            except Exception:
+                cam_name = f"remote_cam_{len(st.session_state.live_threads) + 1}"
+
+        # reset stop flag and spawn thread
+        st.session_state.live_stops[cam_name] = False
+        if cam_name in st.session_state.live_threads and st.session_state.live_threads[cam_name].is_alive():
+            st.info("Camera already running")
+            logger.info("UI: start requested but already running name=%s", cam_name)
         else:
-            # reset stop flag and spawn thread
-            st.session_state.live_stops[cam_name] = False
-            if cam_name in st.session_state.live_threads and st.session_state.live_threads[cam_name].is_alive():
-                st.info("Camera already running")
-                logger.info("UI: start requested but already running name=%s", cam_name)
-            else:
-                t = threading.Thread(target=cam_worker, args=(source_val, cam_name, pre_seconds, post_seconds), daemon=True)
-                st.session_state.live_threads[cam_name] = t
-                t.start()
-                logger.info("UI: started camera worker name=%s", cam_name)
-                st.success(f"Started camera worker: {cam_name}")
+            t = threading.Thread(target=cam_worker, args=(source_val, cam_name, pre_seconds, post_seconds), daemon=True)
+            st.session_state.live_threads[cam_name] = t
+            t.start()
+            logger.info("UI: started camera worker name=%s", cam_name)
+            st.success(f"Started camera worker: {cam_name}")
 
     if stop_btn:
         if cam_name in st.session_state.live_threads:
